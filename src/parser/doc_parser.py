@@ -2,9 +2,11 @@ import os
 from bs4 import BeautifulSoup
 import json
 import re
+
 from src.temporal.temporal_extractor import extract_temporal_expressions
 from src.geo.georeference_extractor import extract_georeferences
-
+from src.geo.geopoint_extractor import get_geopoint
+from src.geo.geonormalizer import normalize_geo_name
 
 
 DATA_DIR = "/Users/mac2/University/Information Retrieval/Smart Doc System/smart-news-retrieval-/archive"
@@ -12,7 +14,6 @@ OUTPUT_DIR = "/Users/mac2/University/Information Retrieval/Smart Doc System/smar
 
 
 def extract_author_from_body(body_text):
-
     if not body_text:
         return None
 
@@ -77,6 +78,7 @@ def parse_reuters_file(file_path):
         date_raw = date_tag.get_text(strip=True) if date_tag else None
         dateline_raw = dateline_tag.get_text(" ", strip=True) if dateline_tag else None
 
+        # Collect <places> tag
         places = []
         if places_tag:
             for d in places_tag.find_all("d"):
@@ -84,25 +86,49 @@ def parse_reuters_file(file_path):
                 if place_name:
                     places.append(place_name)
 
-        # 🔥 NEW — TEMPORAL + GEO
+        # ===== TEMPORAL + GEO EXTRACTION =====
         temporal_expressions = extract_temporal_expressions(body or "")
         geo_references = extract_georeferences(body or "")
 
-        # 🔥 Rule 1 — if no geo found from text, fallback to places
+        # ------- Fallback 1: use <places> tag -------
         if not geo_references and places:
             geo_references = places.copy()
 
-        # 🔥 Rule 2 — if still empty, extract from dateline (e.g., "BOSTON, March 11 -")
+        # ------- Fallback 2: use dateline city -------
         if not geo_references and dateline_raw:
-            
             city = dateline_raw.split(",")[0].strip()
             if city and city.isalpha():
                 geo_references = [city]
 
-        # 🔥 Rule 3 — if still empty, assign ["Unknown"]
+        # ------- Final fallback -------
         if not geo_references:
             geo_references = ["Unknown"]
 
+        # ================================================
+        #   GEO FILTERING (No "the", no short non-words)
+        # ================================================
+        VALID_GEO = []
+        for g in geo_references:
+            g_clean = g.strip()
+            if len(g_clean) > 2 and not g_clean.lower().startswith("the "):
+                VALID_GEO.append(g_clean)
+
+        if not VALID_GEO:
+            VALID_GEO = ["Unknown"]
+
+        # ================================================
+        #           GEOCODING with CACHE + NORMALIZER
+        # ================================================
+        geopoints = []
+        for place in VALID_GEO:
+            norm = normalize_geo_name(place)
+            point = get_geopoint(norm)
+
+            geopoints.append({
+                "place": place,
+                "lat": point["lat"] if point else None,
+                "lon": point["lon"] if point else None
+            })
 
         doc = {
             "title": title,
@@ -112,7 +138,8 @@ def parse_reuters_file(file_path):
             "dateline_raw": dateline_raw,
             "places": places,
             "temporalExpressions": temporal_expressions,
-            "georeferences": geo_references
+            "georeferences": VALID_GEO,
+            "geopoints": geopoints
         }
 
         if title or body:
@@ -123,7 +150,6 @@ def parse_reuters_file(file_path):
 
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-
     all_docs = []
 
     for filename in os.listdir(DATA_DIR):
@@ -137,6 +163,7 @@ def main():
             all_docs.extend(docs)
 
     output_path = os.path.join(OUTPUT_DIR, "all_reuters_parsed.json")
+
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(all_docs, f, ensure_ascii=False, indent=2)
 
